@@ -1,0 +1,277 @@
+---
+title: "CellChat"
+output: html_document
+date: "2025-02-22"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("/gpfs/gibbs/project/wang_zuoheng/xx244/GITIII_benchmark")
+options(future.globals.maxSize = 128 * 1024^3)  # Increase to 5 GB
+```
+
+# Mouse brain
+
+```{r}
+ptm = Sys.time()
+
+library(CellChat)
+library(patchwork)
+options(stringsAsFactors = FALSE)
+
+Sys.setenv(RETICULATE_AUTOCONFIGURE = "FALSE")
+Sys.setenv(RETICULATE_PYTHON = "/home/xx244/.conda/envs/benchmark/bin/python")
+
+library(reticulate)
+torch <- import("torch")
+```
+
+# Mouse brain MERFISH
+
+```{r}
+py_list <- torch$load("/gpfs/gibbs/project/wang_zuoheng/xx244/GITIII_benchmark/data/mouse/genes.pth")
+vec <- unlist(py_list)
+genes<-ifelse(grepl("^[0-9]", vec), paste0("X", vec), vec)
+genes<-gsub("-", ".", genes)
+
+df<-read.csv("/gpfs/gibbs/project/wang_zuoheng/xx244/GITIII_benchmark/data/mouse/mouse.csv")
+df<-df[df$slice_id=="mouse1_slice201",]
+```
+
+```{r}
+data.input<-as.matrix(df[,genes])
+data.input<-t(data.input)
+
+meta <- data.frame(subclass = df$subclass)  # Ensure it’s a dataframe
+meta$sample <- df$slice_id
+rownames(meta)<-rownames(df)
+
+# For MERFISH
+# https://htmlpreview.github.io/?https://github.com/jinworks/CellChat/blob/master/tutorial/FAQ_on_applying_CellChat_to_spatial_transcriptomics_data.html
+conversion.factor = 1
+spot.size = 10 # use the typical human cell size
+spatial.factors = data.frame(ratio = conversion.factor, tol = spot.size/2)
+
+spatial.locs<-df[,c("centerx","centery")]
+colnames(spatial.locs)<-c("x_cent","x_cent")
+
+cellchat <- createCellChat(object = data.input, meta = meta, group.by = "subclass",
+                           datatype = "spatial", coordinates = spatial.locs, spatial.factors = spatial.factors)
+```
+
+```{r}
+CellChatDB <- CellChatDB.mouse
+CellChatDB.use <- CellChatDB
+cellchat@DB <- CellChatDB.use
+
+cellchat <- subsetData(cellchat) # This step is necessary even if using the whole database
+future::plan("multisession", workers = 4) 
+cellchat <- identifyOverExpressedGenes(cellchat, do.DE = FALSE, min.cells = 10)
+cellchat <- identifyOverExpressedInteractions(cellchat, variable.both = F)
+```
+
+```{r}
+d.spatial <- computeCellDistance(coordinates = spatial.locs, ratio = spatial.factors$ratio, tol = spatial.factors$tol)
+min(d.spatial[d.spatial!=0])
+```
+
+```{r}
+cellchat <- computeCommunProb(cellchat, type = "truncatedMean", trim = 0.1,
+                              distance.use = TRUE, interaction.range = 250, scale.distance = 1.5/min(d.spatial[d.spatial!=0]),
+                              contact.dependent = TRUE, contact.range = 100)
+```
+
+
+```{r}
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+```
+
+```{r}
+df.net <- subsetCommunication(cellchat)
+write.csv(df.net, "./CellChat/mouse.csv")
+```
+
+```{r}
+cellchat <- aggregateNet(cellchat)
+write.csv(data.frame(cellchat@net$weight), "./CellChat/mouse_aggregated.csv")
+```
+
+# AD MERFISH
+
+```{r}
+py_list <- torch$load("/gpfs/gibbs/project/wang_zuoheng/xx244/GITIII_benchmark/data/AD/genes.pth")
+vec <- unlist(py_list)
+genes<-ifelse(grepl("^[0-9]", vec), paste0("X", vec), vec)
+genes<-gsub("-", ".", genes)
+
+df<-read.csv("/gpfs/gibbs/project/wang_zuoheng/xx244/GITIII_benchmark/data/AD/AD.csv")
+df<-df[df$section=="H20.33.001.CX28.MTG.02.007.1.02.03",]
+
+data.input<-as.matrix(df[,genes])
+data.input<-t(data.input)
+
+meta <- data.frame(subclass = df$subclass)  # Ensure it’s a dataframe
+meta$sample <- df$slice_id
+rownames(meta)<-rownames(df)
+
+# For MERFISH
+# https://htmlpreview.github.io/?https://github.com/jinworks/CellChat/blob/master/tutorial/FAQ_on_applying_CellChat_to_spatial_transcriptomics_data.html
+conversion.factor = 1
+spot.size = 10 # use the typical human cell size
+spatial.factors = data.frame(ratio = conversion.factor, tol = spot.size/2)
+
+spatial.locs<-df[,c("centerx","centery")]
+colnames(spatial.locs)<-c("x_cent","x_cent")
+
+cellchat <- createCellChat(object = data.input, meta = meta, group.by = "subclass",
+                           datatype = "spatial", coordinates = spatial.locs, spatial.factors = spatial.factors)
+```
+
+```{r}
+CellChatDB <- CellChatDB.human
+CellChatDB.use <- CellChatDB
+cellchat@DB <- CellChatDB.use
+
+cellchat <- subsetData(cellchat) # This step is necessary even if using the whole database
+future::plan("multisession", workers = 4) 
+cellchat <- identifyOverExpressedGenes(cellchat, do.DE = FALSE, min.cells = 10)
+cellchat <- identifyOverExpressedInteractions(cellchat, variable.both = F)
+
+d.spatial <- computeCellDistance(coordinates = spatial.locs, ratio = spatial.factors$ratio, tol = spatial.factors$tol)
+min(d.spatial[d.spatial!=0])
+
+cellchat <- computeCommunProb(cellchat, type = "truncatedMean", trim = 0.1,
+                              distance.use = TRUE, interaction.range = 250, scale.distance = 1.5/min(d.spatial[d.spatial!=0]),
+                              contact.dependent = TRUE, contact.range = 100)
+
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+
+df.net <- subsetCommunication(cellchat)
+write.csv(df.net, "./CellChat/AD.csv")
+
+cellchat <- aggregateNet(cellchat)
+write.csv(data.frame(cellchat@net$weight), "./CellChat/AD_aggregated.csv")
+```
+
+# NSCLC Cosmx
+
+```{r}
+py_list <- torch$load("/gpfs/gibbs/project/wang_zuoheng/xx244/GITIII_benchmark/data/NSCLC/genes.pth")
+vec <- unlist(py_list)
+genes<-ifelse(grepl("^[0-9]", vec), paste0("X", vec), vec)
+genes<-gsub("-", ".", genes)
+
+df<-read.csv("/gpfs/gibbs/project/wang_zuoheng/xx244/GITIII_benchmark/data/NSCLC/NSCLC.csv")
+df<-df[df$section=="Lung6",]
+
+data.input<-as.matrix(df[,genes])
+data.input<-t(data.input)
+
+meta <- data.frame(CellType = df$CellType)  # Ensure it’s a dataframe
+meta$sample <- df$slice_id
+rownames(meta)<-rownames(df)
+
+spatial.locs<-df[,c("CenterX_global_px","CenterY_global_px")]
+colnames(spatial.locs)<-c("x_cent","x_cent")
+
+# For Cosmx
+# https://htmlpreview.github.io/?https://github.com/jinworks/CellChat/blob/master/tutorial/FAQ_on_applying_CellChat_to_spatial_transcriptomics_data.html
+conversion.factor = 0.18
+d = computeCellDistance(spatial.locs)
+spot.size = min(d)*conversion.factor # converting the distance in Pixels to Micrometers
+spatial.factors = data.frame(ratio = conversion.factor, tol = spot.size/2)
+
+cellchat <- createCellChat(object = data.input, meta = meta, group.by = "CellType",
+                           datatype = "spatial", coordinates = spatial.locs, spatial.factors = spatial.factors)
+```
+
+```{r}
+CellChatDB <- CellChatDB.human
+CellChatDB.use <- CellChatDB
+cellchat@DB <- CellChatDB.use
+
+cellchat <- subsetData(cellchat) # This step is necessary even if using the whole database
+future::plan("multisession", workers = 4) 
+cellchat <- identifyOverExpressedGenes(cellchat, do.DE = FALSE, min.cells = 10)
+cellchat <- identifyOverExpressedInteractions(cellchat, variable.both = F)
+
+d.spatial <- computeCellDistance(coordinates = spatial.locs, ratio = spatial.factors$ratio, tol = spatial.factors$tol)
+min(d.spatial[d.spatial!=0])
+
+cellchat <- computeCommunProb(cellchat, type = "truncatedMean", trim = 0.1,
+                              distance.use = TRUE, interaction.range = 250, scale.distance = 1.5/min(d.spatial[d.spatial!=0]),
+                              contact.dependent = TRUE, contact.range = 100)
+
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+
+df.net <- subsetCommunication(cellchat)
+write.csv(df.net, "./CellChat/NSCLC.csv")
+
+cellchat <- aggregateNet(cellchat)
+write.csv(data.frame(cellchat@net$weight), "./CellChat/NSCLC_aggregated.csv")
+```
+
+# BC Xenium
+
+```{r}
+py_list <- torch$load("/gpfs/gibbs/project/wang_zuoheng/xx244/GITIII_benchmark/data/BC/genes.pth")
+vec <- unlist(py_list)
+genes<-ifelse(grepl("^[0-9]", vec), paste0("X", vec), vec)
+genes<-gsub("-", ".", genes)
+
+df<-read.csv("/gpfs/gibbs/project/wang_zuoheng/xx244/GITIII_benchmark/data/BC/BC.csv")
+df<-df[df$section=="sample1_rep1",]
+
+data.input<-as.matrix(df[,genes])
+data.input<-t(data.input)
+
+meta <- data.frame(subclass = df$subclass)  # Ensure it’s a dataframe
+meta$sample <- df$slice_id
+rownames(meta)<-rownames(df)
+
+spatial.locs<-df[,c("centerx","centery")]
+colnames(spatial.locs)<-c("x_cent","x_cent")
+
+# For Xenium
+# https://htmlpreview.github.io/?https://github.com/jinworks/CellChat/blob/master/tutorial/FAQ_on_applying_CellChat_to_spatial_transcriptomics_data.html
+conversion.factor = 0.2125
+d = computeCellDistance(spatial.locs)
+spot.size = min(d)*conversion.factor # converting the distance in Pixels to Micrometers
+spatial.factors = data.frame(ratio = conversion.factor, tol = spot.size/2)
+
+cellchat <- createCellChat(object = data.input, meta = meta, group.by = "subclass",
+                           datatype = "spatial", coordinates = spatial.locs, spatial.factors = spatial.factors)
+```
+
+```{r}
+CellChatDB <- CellChatDB.human
+CellChatDB.use <- CellChatDB
+cellchat@DB <- CellChatDB.use
+
+cellchat <- subsetData(cellchat) # This step is necessary even if using the whole database
+future::plan("multisession", workers = 4) 
+cellchat <- identifyOverExpressedGenes(cellchat, do.DE = FALSE, min.cells = 10)
+cellchat <- identifyOverExpressedInteractions(cellchat, variable.both = F)
+
+d.spatial <- computeCellDistance(coordinates = spatial.locs, ratio = spatial.factors$ratio, tol = spatial.factors$tol)
+min(d.spatial[d.spatial!=0])
+
+cellchat <- computeCommunProb(cellchat, type = "truncatedMean", trim = 0.1,
+                              distance.use = TRUE, interaction.range = 250, scale.distance = 1.5/min(d.spatial[d.spatial!=0]),
+                              contact.dependent = TRUE, contact.range = 100)
+
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+
+df.net <- subsetCommunication(cellchat)
+write.csv(df.net, "./CellChat/BC.csv")
+
+cellchat <- aggregateNet(cellchat)
+write.csv(data.frame(cellchat@net$weight), "./CellChat/BC_aggregated.csv")
+```
+
+
+
+
+
+
+

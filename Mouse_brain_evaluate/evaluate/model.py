@@ -1,0 +1,105 @@
+import torch
+import torch.nn as nn
+import numpy as np
+import random
+import os
+
+from attention import GRIT_encoder,GRIT_encoder_last_layer
+from embedding import Embedding
+
+class GITIII(nn.Module):
+    def __init__(self,genes,ligands_info,node_dim,edge_dim,num_heads,n_layers,node_dim_small=16,att_dim=8):
+        super().__init__()
+        self.embeddings=Embedding(genes,ligands_info,node_dim,edge_dim)
+        self.encoders=nn.ModuleList([
+            GRIT_encoder(node_dim,edge_dim,num_heads,att_dim) for i in range(n_layers-1)
+        ])
+        self.last_layer=GRIT_encoder_last_layer(node_dim, len(genes), edge_dim, node_dim_small, att_dim)
+
+    def forward(self,x):
+        x=self.embeddings(x)
+        for encoderi in self.encoders:
+            x=encoderi(x)
+        x=self.last_layer(x)
+        return x
+
+class Loss_function(nn.Module):
+    def __init__(self,gene_list,interaction_gene_list1):
+        super().__init__()
+        interaction_gene_list=list(set(elem for sublist in interaction_gene_list1[0] for elem in sublist))
+
+        self.interaction_gene_index = []
+        self.not_interaction_gene_index = []
+        for i in range(len(gene_list)):
+            if gene_list[i] in interaction_gene_list:
+                self.interaction_gene_index.append(i)
+            else:
+                self.not_interaction_gene_index.append(i)
+        self.interaction_gene_index = torch.LongTensor(self.interaction_gene_index).cuda()
+        self.not_interaction_gene_index = torch.LongTensor(self.not_interaction_gene_index).cuda()
+
+        self.mse=nn.MSELoss()
+
+    def forward(self,y_pred,y):
+        output,edges=y_pred
+        mse_loss=self.mse(output,y)
+        return (mse_loss,
+                self.mse(output[:,self.not_interaction_gene_index],y[:,self.not_interaction_gene_index]).detach().cpu())
+
+def set_seed(seed_value=42):
+    """Set seed for reproducibility."""
+    # Python random module
+    random.seed(seed_value)
+    # Numpy
+    np.random.seed(seed_value)
+    # PyTorch
+    torch.manual_seed(seed_value)
+    # CUDA
+    torch.cuda.manual_seed(seed_value)
+    torch.cuda.manual_seed_all(seed_value)  # if using multi-GPU
+    # Additional configurations to enforce deterministic behavior
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    # Setting environment variables to further ensure reproducibility
+    os.environ['PYTHONHASHSEED'] = str(seed_value)
+
+set_seed(123)
+
+if __name__=="__main__":
+    torch.cuda.empty_cache()
+    batch_size = 30
+    lr = 1e-4
+    data_dir = "../../data/Mouse_brain/processed/"
+    folds = 5
+    epochs = 200
+
+    from dataloader import Mouse_brain_dataset
+    dataset = Mouse_brain_dataset(processed_dir=data_dir)
+    from torch.utils.data import DataLoader, random_split
+
+    my_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    ligands_info = torch.load("/".join(data_dir.split("/")[:-2]) + "/ligands.pth")
+    genes = torch.load("/".join(data_dir.split("/")[:-2]) + "/genes.pth")
+
+    my_model = GITIII(genes,ligands_info,node_dim=256,edge_dim=48,num_heads=2,n_layers=3,node_dim_small=16,att_dim=8)
+    my_model=my_model.cuda()
+    optimizer = torch.optim.AdamW(my_model.parameters(), lr=lr, betas=(0.99, 0.999))
+    loss_func = Loss_function(genes, ligands_info).cuda()
+    import time
+
+    for i in range(20):
+        print("start training")
+        start = time.time()
+        for (stepi, batch) in enumerate(my_loader):
+            batch = {k: v.cuda() for k, v in batch.items()}
+            '''for k, v in batch.items():
+                print(k,v.shape,torch.mean(torch.abs(v.float())))'''
+            output = my_model(batch)
+            print("output",output[0].shape,torch.mean(torch.abs(output[0])),torch.mean(output[0]),torch.mean(torch.abs(batch["y"])),torch.mean(batch["y"]))
+            print(loss_func(output, batch["y"]))
+            print(output[1][0].shape)
+            alphas = output[1][0][0, :, 0, :]
+            print(torch.topk(torch.mean(torch.abs(alphas) / torch.abs(torch.sum(alphas, dim=-1, keepdim=True)), dim=0), k=30, dim=-1))
+
+        print(time.time() - start)
