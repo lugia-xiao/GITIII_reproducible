@@ -1,1 +1,1 @@
-Reproducible code for GITIII manuscript
+Reproducible code for GITIII (https://github.com/lugia-xiao/GITIII)
