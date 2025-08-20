@@ -1,0 +1,236 @@
+---
+title: "run_giotto"
+output: html_document
+date: "2025-08-18"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Giotto)
+setwd("/gpfs/gibbs/project/wang_zuoheng/xx244/GITIII_benchmark")
+
+library(reticulate)
+use_condaenv("benchmark", required = TRUE)  # or your env name
+py_config()
+```
+
+# BC
+
+```{r}
+# Load expression matrix
+expr <- readRDS("./cytosignal/BC.rds")
+
+# Load metadata CSV and subset to desired section
+df <- read.csv("/gpfs/gibbs/project/wang_zuoheng/xx244/GITIII_benchmark/data/BC/BC.csv")
+df <- df[df$section == "sample1_rep1", ]
+
+## =========================
+## 2) Align cell IDs
+## =========================
+# If df has a column with cell IDs, use it here instead of rownames(df)
+cell_ids <- rownames(df)  # change if needed, e.g., df$barcode
+
+# Assign cell IDs to expression matrix columns
+colnames(expr) <- cell_ids
+
+# Cluster annotation
+cluster <- factor(df$subclass)
+names(cluster) <- colnames(expr)
+
+# Spatial coordinates
+spatial <- cbind(
+  x = df$centerx,
+  y = df$centery
+)
+rownames(spatial) <- colnames(expr)
+spatial <- as.data.frame(spatial)
+colnames(spatial) <- c("x", "y")
+
+if (TRUE){
+# save expression matrix (genes as rows, cells as columns)
+write.table(as.matrix(expr),
+            file = "./giotto/BC/my_expr.txt",
+            sep = "\t",
+            quote = FALSE,
+            row.names = TRUE,   # keep gene names
+            col.names = NA)     # keep cell IDs
+
+# save spatial locations (cell IDs + coordinates)
+write.table(spatial,
+            file = "./giotto/BC/my_locs.txt",
+            sep = "\t",
+            quote = FALSE,
+            row.names = FALSE)  # no need to keep row names
+
+clusters_cell_types<-factor(df$subclass)
+names(clusters_cell_types) <- colnames(expr)
+}
+
+path_to_matrix    <- "/gpfs/gibbs/project/wang_zuoheng/xx244/GITIII_benchmark/giotto/BC/my_expr.txt"
+path_to_locations <- "/gpfs/gibbs/project/wang_zuoheng/xx244/GITIII_benchmark/giotto/BC/my_locs.txt"
+
+my_giotto_object <- createGiottoObject(raw_exprs = path_to_matrix,
+                                       spatial_locs = path_to_locations)
+
+
+# 1) Align annotations to your cell order
+cell_ids    <- giotto_ids <- Giotto::pDataDT(my_giotto_object)$cell_ID        
+cell_types  <- df[, "subclass", drop = TRUE]        # align by rownames
+
+# (optional) sanity checks
+stopifnot(length(cell_ids) == length(cell_types))
+if (any(is.na(cell_types))) message("Some cells have no subclass; they'll be NA.")
+
+# 2) Build metadata frame in the format Giotto expects
+meta <- data.frame(
+  cell_ID   = cell_ids,
+  cell_types = cell_types,
+  stringsAsFactors = FALSE
+)
+
+# 3) Add to the Giotto object
+my_giotto_object <- addCellMetadata(
+  gobject         = my_giotto_object,
+  new_metadata    = meta,
+  by_column       = TRUE,
+  column_cell_ID  = "cell_ID"     # <-- must match the column name you just created
+)
+
+# processing
+my_giotto_object <- filterGiotto(gobject = my_giotto_object, 
+                             expression_threshold = 0.00000001, 
+                             gene_det_in_min_cells = 20, 
+                             min_det_genes_per_cell = 0)
+my_giotto_object <- normalizeGiotto(gobject = my_giotto_object)
+
+if (FALSE){
+# dimension reduction
+my_giotto_object <- calculateHVG(gobject = my_giotto_object)
+my_giotto_object <- runPCA(gobject = my_giotto_object)
+my_giotto_object <- runUMAP(my_giotto_object, dimensions_to_use = 1:5)
+}
+
+```
+
+
+```{r}
+if(FALSE){
+  cat("\n[WHY SUBSET]\n",
+    "TWCOM uses pairwise distance (O(n^2)).\n",
+    "With one slide containing ~167,780 cells, building the full\n",
+    "distance matrix exceeds memory and causes segmentation faults.\n",
+    "Therefore, we must select a subset (≤ target_n) of cells.\n\n", sep = "")
+
+## ---------------------------- CONFIG ----------------------------
+target_n <- 10000L   # desired max number of cells/spots
+## ----------------------------------------------------------------
+
+## 1) Pull from slots (no accessors)
+expr_mat <- my_giotto_object@raw_exprs         # genes x cells; colnames = cell_IDs
+sp_locs  <- my_giotto_object@spatial_locs      # data.frame with columns: sdimx, sdimy, cell_ID
+#stopifnot(is.matrix(expr_mat), is.data.frame(sp_locs))
+stopifnot(all(c("sdimx", "sdimy", "cell_ID") %in% colnames(sp_locs)))
+
+## 2) Align so coordinates follow the expression column order
+all_ids <- colnames(expr_mat)
+common  <- intersect(all_ids, sp_locs$cell_ID)
+if (length(common) == 0L) stop("No overlapping cell IDs between raw_exprs and spatial_locs")
+
+# restrict both sides to the common set; keep expr column order
+expr_mat <- expr_mat[, common, drop = FALSE]
+sp_locs  <- sp_locs[match(common, sp_locs$cell_ID), , drop = FALSE]
+stopifnot(identical(colnames(expr_mat), sp_locs$cell_ID))
+
+## 3) Compute center of tissue (midpoint of bounding box)
+x <- as.numeric(sp_locs$sdimx)
+y <- as.numeric(sp_locs$sdimy)
+xmin <- min(x); xmax <- max(x)
+ymin <- min(y); ymax <- max(y)
+cx <- (xmin + xmax)/2
+cy <- (ymin + ymax)/2
+
+## 4) Binary-search square half-size 's' so count <= target_n
+dx <- abs(x - cx); dy <- abs(y - cy)
+lo <- 0
+hi <- max(xmax - cx, ymax - cy)
+
+for (iter in 1:50) {
+  mid <- (lo + hi) / 2
+  cnt <- sum(dx <= mid & dy <= mid)
+  if (cnt > target_n) hi <- mid else lo <- mid
+}
+s <- lo
+
+## 5) Build keep mask (axis-aligned square)
+keep <- (dx <= s) & (dy <= s)
+
+## Handle boundary ties if just over target_n: trim by Chebyshev distance
+sel_n <- sum(keep)
+if (sel_n > target_n) {
+  cheb <- pmax(dx[keep], dy[keep])           # distance within the square
+  ord  <- order(cheb, decreasing = FALSE)    # closest to center first
+  idx_keep <- which(keep)[ord][seq_len(target_n)]
+  keep[] <- FALSE
+  keep[idx_keep] <- TRUE
+  sel_n <- target_n
+}
+
+## 6) Selected IDs and indices (relative to expr_mat column order)
+keep_ids <- colnames(expr_mat)[keep]
+keep_idx <- which(keep)
+
+## 7) Report cutoff and selection summary
+cat("[SELECTION]\n",
+    sprintf("Center:      (%.2f, %.2f)\n", cx, cy),
+    sprintf("Half-size s: %.2f (square side = %.2f)\n", s, 2*s),
+    sprintf("Bounds:      x in [%.2f, %.2f], y in [%.2f, %.2f]\n", cx - s, cx + s, cy - s, cy + s),
+    sprintf("Selected:    %d cells (target_n = %d)\n\n", sel_n, target_n),
+    sep = "")
+
+## 8) Subset the Giotto object to selected cells
+g_subset <- subsetGiotto(my_giotto_object, cell_ids = keep_ids)
+
+g_subset<-Giotto::createSpatialDelaunayNetwork(
+  g_subset,
+  name = "Delaunay_network",delaunay_method = "delaunayn_geometry")
+}
+```
+
+```{r}
+my_giotto_object<-Giotto::createSpatialDelaunayNetwork(
+  my_giotto_object,
+  name = "Delaunay_network")
+
+# Read in your data
+df_lr <- read.csv("./CellChat/BC.csv", stringsAsFactors = FALSE)
+
+# Make unique ligand-receptor pairs
+pairs <- unique(df_lr[, c("ligand", "receptor")])
+
+# Extract the two gene vectors
+ligand_genes <- pairs$ligand
+receptor_genes <- pairs$receptor
+my_giotto_object <- runPCA(gobject = my_giotto_object)
+my_giotto_object <- runUMAP(my_giotto_object, dimensions_to_use = 1:5)
+
+## 1) Gene universe from the Giotto object
+valid_genes <- my_giotto_object@raw_exprs@Dimnames[[1]]
+
+## 2) Build LR pairs and filter
+lr_pairs <- data.frame(
+  ligand   = trimws(ligand_genes),
+  receptor = trimws(receptor_genes),
+  stringsAsFactors = FALSE
+)
+
+# keep only those where both genes are present
+lr_pairs_valid <- subset(
+  lr_pairs,
+  ligand %in% valid_genes & receptor %in% valid_genes
+)
+
+res<-spatCellCellcom(my_giotto_object,verbose = "a little", gene_set_1 = lr_pairs_valid$ligand, gene_set_2=lr_pairs_valid$receptor)
+
+saveRDS(my_giotto_object, file = "./giotto/BC.rds")
+saveRDS(res, file = "./giotto/BC_res.rds")
+```

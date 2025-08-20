@@ -1,0 +1,297 @@
+---
+title: "run_giotto"
+output: html_document
+date: "2025-08-18"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Giotto)
+setwd("/gpfs/gibbs/project/wang_zuoheng/xx244/GITIII_benchmark")
+
+library(reticulate)
+use_condaenv("benchmark", required = TRUE)  # or your env name
+py_config()
+```
+
+# NSCLC
+
+```{r}
+# Load expression matrix
+expr <- readRDS("./cytosignal/NSCLC.rds")
+
+# Load metadata CSV and subset to desired section
+df <- read.csv("/gpfs/gibbs/project/wang_zuoheng/xx244/GITIII_benchmark/data/NSCLC/NSCLC.csv")
+df <- df[df$section == "Lung6", ]
+
+## =========================
+## 2) Align cell IDs
+## =========================
+# If df has a column with cell IDs, use it here instead of rownames(df)
+cell_ids <- rownames(df)  # change if needed, e.g., df$barcode
+
+# Assign cell IDs to expression matrix columns
+colnames(expr) <- cell_ids
+
+# Cluster annotation
+cluster <- factor(df$CellType)
+names(cluster) <- colnames(expr)
+
+# Spatial coordinates
+spatial <- cbind(
+  x = df$CenterX_global_px,
+  y = df$CenterY_global_px
+)
+rownames(spatial) <- colnames(expr)
+spatial <- as.data.frame(spatial)
+colnames(spatial) <- c("x", "y")
+```
+
+```{r}
+if (FALSE){
+# save expression matrix (genes as rows, cells as columns)
+write.table(expr,
+            file = "./giotto/NSCLC/my_expr.txt",
+            sep = "\t",
+            quote = FALSE,
+            row.names = TRUE,   # keep gene names
+            col.names = NA)     # keep cell IDs
+
+# save spatial locations (cell IDs + coordinates)
+write.table(spatial,
+            file = "./giotto/NSCLC/my_locs.txt",
+            sep = "\t",
+            quote = FALSE,
+            row.names = FALSE)  # no need to keep row names
+
+clusters_cell_types<-factor(df$CellType)
+names(clusters_cell_types) <- colnames(expr)
+}
+
+path_to_matrix    <- "/gpfs/gibbs/project/wang_zuoheng/xx244/GITIII_benchmark/giotto/NSCLC/my_expr.txt"
+path_to_locations <- "/gpfs/gibbs/project/wang_zuoheng/xx244/GITIII_benchmark/giotto/NSCLC/my_locs.txt"
+
+my_giotto_object <- createGiottoObject(raw_exprs = path_to_matrix,
+                                       spatial_locs = path_to_locations)
+
+```
+
+```{r}
+# 1) Align annotations to your cell order
+cell_ids    <- giotto_ids <- Giotto::pDataDT(my_giotto_object)$cell_ID        
+cell_types  <- df[, "CellType", drop = TRUE]        # align by rownames
+
+# (optional) sanity checks
+stopifnot(length(cell_ids) == length(cell_types))
+if (any(is.na(cell_types))) message("Some cells have no CellType; they'll be NA.")
+
+# 2) Build metadata frame in the format Giotto expects
+meta <- data.frame(
+  cell_ID   = cell_ids,
+  cell_types = cell_types,
+  stringsAsFactors = FALSE
+)
+
+# 3) Add to the Giotto object
+my_giotto_object <- addCellMetadata(
+  gobject         = my_giotto_object,
+  new_metadata    = meta,
+  by_column       = TRUE,
+  column_cell_ID  = "cell_ID"     # <-- must match the column name you just created
+)
+```
+
+```{r}
+# processing
+my_giotto_object <- filterGiotto(gobject = my_giotto_object, 
+                             expression_threshold = 0.00000001, 
+                             gene_det_in_min_cells = 20, 
+                             min_det_genes_per_cell = 0)
+my_giotto_object <- normalizeGiotto(gobject = my_giotto_object)
+
+if (FALSE){
+# dimension reduction
+my_giotto_object <- calculateHVG(gobject = my_giotto_object)
+my_giotto_object <- runPCA(gobject = my_giotto_object)
+my_giotto_object <- runUMAP(my_giotto_object, dimensions_to_use = 1:5)
+}
+```
+
+```{r}
+my_giotto_object<-Giotto::createSpatialDelaunayNetwork(
+  my_giotto_object,
+  name = "Delaunay_network")
+```
+
+```{r}
+# Read in your data
+df_lr <- read.csv("./CellChat/NSCLC.csv", stringsAsFactors = FALSE)
+
+# Make unique ligand-receptor pairs
+pairs <- unique(df_lr[, c("ligand", "receptor")])
+
+# Extract the two gene vectors
+ligand_genes <- pairs$ligand
+receptor_genes <- pairs$receptor
+```
+
+```{r}
+## 1) Gene universe from the Giotto object
+valid_genes <- my_giotto_object@raw_exprs@Dimnames[[1]]
+
+## 2) Build LR pairs and filter
+lr_pairs <- data.frame(
+  ligand   = trimws(ligand_genes),
+  receptor = trimws(receptor_genes),
+  stringsAsFactors = FALSE
+)
+
+# keep only those where both genes are present
+lr_pairs_valid <- subset(
+  lr_pairs,
+  ligand %in% valid_genes & receptor %in% valid_genes
+)
+```
+
+
+```{r}
+res<-spatCellCellcom(my_giotto_object,verbose = "a little", gene_set_1 = lr_pairs_valid$ligand, gene_set_2=lr_pairs_valid$receptor)
+
+saveRDS(my_giotto_object, file = "./giotto/NSCLC.rds")
+saveRDS(res, file = "./giotto/NSCLC_res.rds")
+```
+
+
+# BC
+
+```{r}
+# Load expression matrix
+expr <- readRDS("./cytosignal/BC.rds")
+
+# Load metadata CSV and subset to desired section
+df <- read.csv("/gpfs/gibbs/project/wang_zuoheng/xx244/GITIII_benchmark/data/BC/BC.csv")
+df <- df[df$section == "sample1_rep1", ]
+
+## =========================
+## 2) Align cell IDs
+## =========================
+# If df has a column with cell IDs, use it here instead of rownames(df)
+cell_ids <- rownames(df)  # change if needed, e.g., df$barcode
+
+# Assign cell IDs to expression matrix columns
+colnames(expr) <- cell_ids
+
+# Cluster annotation
+cluster <- factor(df$subclass)
+names(cluster) <- colnames(expr)
+
+# Spatial coordinates
+spatial <- cbind(
+  x = df$centerx,
+  y = df$centerx
+)
+rownames(spatial) <- colnames(expr)
+spatial <- as.data.frame(spatial)
+colnames(spatial) <- c("x", "y")
+
+if (TRUE){
+# save expression matrix (genes as rows, cells as columns)
+write.table(as.matrix(expr),
+            file = "./giotto/BC/my_expr.txt",
+            sep = "\t",
+            quote = FALSE,
+            row.names = TRUE,   # keep gene names
+            col.names = NA)     # keep cell IDs
+
+# save spatial locations (cell IDs + coordinates)
+write.table(spatial,
+            file = "./giotto/BC/my_locs.txt",
+            sep = "\t",
+            quote = FALSE,
+            row.names = FALSE)  # no need to keep row names
+
+clusters_cell_types<-factor(df$subclass)
+names(clusters_cell_types) <- colnames(expr)
+}
+
+path_to_matrix    <- "/gpfs/gibbs/project/wang_zuoheng/xx244/GITIII_benchmark/giotto/BC/my_expr.txt"
+path_to_locations <- "/gpfs/gibbs/project/wang_zuoheng/xx244/GITIII_benchmark/giotto/BC/my_locs.txt"
+
+my_giotto_object <- createGiottoObject(raw_exprs = path_to_matrix,
+                                       spatial_locs = path_to_locations)
+
+
+# 1) Align annotations to your cell order
+cell_ids    <- giotto_ids <- Giotto::pDataDT(my_giotto_object)$cell_ID        
+cell_types  <- df[, "subclass", drop = TRUE]        # align by rownames
+
+# (optional) sanity checks
+stopifnot(length(cell_ids) == length(cell_types))
+if (any(is.na(cell_types))) message("Some cells have no subclass; they'll be NA.")
+
+# 2) Build metadata frame in the format Giotto expects
+meta <- data.frame(
+  cell_ID   = cell_ids,
+  cell_types = cell_types,
+  stringsAsFactors = FALSE
+)
+
+# 3) Add to the Giotto object
+my_giotto_object <- addCellMetadata(
+  gobject         = my_giotto_object,
+  new_metadata    = meta,
+  by_column       = TRUE,
+  column_cell_ID  = "cell_ID"     # <-- must match the column name you just created
+)
+
+# processing
+my_giotto_object <- filterGiotto(gobject = my_giotto_object, 
+                             expression_threshold = 0.00000001, 
+                             gene_det_in_min_cells = 20, 
+                             min_det_genes_per_cell = 0)
+my_giotto_object <- normalizeGiotto(gobject = my_giotto_object)
+
+if (FALSE){
+# dimension reduction
+my_giotto_object <- calculateHVG(gobject = my_giotto_object)
+my_giotto_object <- runPCA(gobject = my_giotto_object)
+my_giotto_object <- runUMAP(my_giotto_object, dimensions_to_use = 1:5)
+}
+
+my_giotto_object<-Giotto::createSpatialDelaunayNetwork(
+  my_giotto_object,
+  name = "Delaunay_network")
+
+# Read in your data
+df_lr <- read.csv("./CellChat/BC.csv", stringsAsFactors = FALSE)
+
+# Make unique ligand-receptor pairs
+pairs <- unique(df_lr[, c("ligand", "receptor")])
+
+# Extract the two gene vectors
+ligand_genes <- pairs$ligand
+receptor_genes <- pairs$receptor
+my_giotto_object <- runPCA(gobject = my_giotto_object)
+my_giotto_object <- runUMAP(my_giotto_object, dimensions_to_use = 1:5)
+
+## 1) Gene universe from the Giotto object
+valid_genes <- my_giotto_object@raw_exprs@Dimnames[[1]]
+
+## 2) Build LR pairs and filter
+lr_pairs <- data.frame(
+  ligand   = trimws(ligand_genes),
+  receptor = trimws(receptor_genes),
+  stringsAsFactors = FALSE
+)
+
+# keep only those where both genes are present
+lr_pairs_valid <- subset(
+  lr_pairs,
+  ligand %in% valid_genes & receptor %in% valid_genes
+)
+
+res<-spatCellCellcom(my_giotto_object,verbose = "a little", gene_set_1 = lr_pairs_valid$ligand, gene_set_2=lr_pairs_valid$receptor)
+
+saveRDS(my_giotto_object, file = "./giotto/BC.rds")
+saveRDS(res, file = "./giotto/BC_res.rds")
+```

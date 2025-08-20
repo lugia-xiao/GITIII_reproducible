@@ -1,0 +1,107 @@
+---
+title: "interpret_giotto"
+output: html_document
+date: "2025-08-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(Giotto)
+setwd("/gpfs/gibbs/project/wang_zuoheng/xx244/GITIII_benchmark")
+
+library(reticulate)
+use_condaenv("benchmark", required = TRUE)  # or your env name
+py_config()
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(readr)
+```
+
+# NSCLC
+
+```{r}
+# Adjust the path if needed
+res <- readRDS("./giotto/NSCLC_res.rds")
+res$PI<-abs(res$PI)
+
+# ---- processing ----
+res_processed <- res %>%
+  # 1) keep only p.adj >= 0.05 (i.e., remove rows with p.adj < 0.05)
+  filter(p.adj >= 0.05) %>%
+  
+  # 2) normalize PI within each ligand–receptor pair
+  group_by(ligand, receptor) %>%
+  mutate(
+    sum_PI = sum(PI, na.rm = TRUE),
+    PI_norm = ifelse(sum_PI > 0, PI / sum_PI, 0)
+  ) %>%
+  ungroup() %>%
+  select(-sum_PI)
+
+# 3) summarize to sender (rows) × receiver (cols) by averaging normalized PI
+sender_receiver_avg <- res_processed %>%
+  group_by(lig_cell_type, rec_cell_type) %>%
+  summarise(PI_avg = mean(PI_norm, na.rm = TRUE), .groups = "drop") %>%
+  # 4) pivot to wide matrix-like table
+  pivot_wider(
+    names_from = rec_cell_type,
+    values_from = PI_avg,
+    values_fill = 0
+  )
+
+# convert to a proper numeric matrix (rownames = sender / lig_cell_type)
+mat_res <- as.data.frame(sender_receiver_avg)
+rownames(mat_res) <- mat_res$lig_cell_type
+mat_res <- as.matrix(mat_res[ , setdiff(names(mat_res), "lig_cell_type"), drop = FALSE])
+
+# ---- output: CSV ----
+dir.create("./giotto", showWarnings = FALSE, recursive = TRUE)
+# write.csv preserves row names (sender cell types)
+write.csv(mat_res, file = "./giotto/NSCLC.csv", row.names = TRUE)
+```
+
+# BC
+
+```{r}
+# Adjust the path if needed
+res <- readRDS("./giotto/BC_res.rds")
+res$PI<-abs(res$PI)
+
+# ---- processing ----
+res_processed <- res %>%
+  # 1) keep only p.adj >= 0.05 (i.e., remove rows with p.adj < 0.05)
+  filter(p.adj >= 0.05) %>%
+  
+  # 2) normalize PI within each ligand–receptor pair
+  group_by(ligand, receptor) %>%
+  mutate(
+    sum_PI = sum(PI, na.rm = TRUE),
+    PI_norm = ifelse(sum_PI > 0, PI / sum_PI, 0)
+  ) %>%
+  ungroup() %>%
+  select(-sum_PI)
+
+# 3) summarize to sender (rows) × receiver (cols) by averaging normalized PI
+sender_receiver_avg <- res_processed %>%
+  group_by(lig_cell_type, rec_cell_type) %>%
+  summarise(PI_avg = mean(PI_norm, na.rm = TRUE), .groups = "drop") %>%
+  # 4) pivot to wide matrix-like table
+  pivot_wider(
+    names_from = rec_cell_type,
+    values_from = PI_avg,
+    values_fill = 0
+  )
+
+# convert to a proper numeric matrix (rownames = sender / lig_cell_type)
+mat_res <- as.data.frame(sender_receiver_avg)
+rownames(mat_res) <- mat_res$lig_cell_type
+mat_res <- as.matrix(mat_res[ , setdiff(names(mat_res), "lig_cell_type"), drop = FALSE])
+
+# ---- output: CSV ----
+dir.create("./giotto", showWarnings = FALSE, recursive = TRUE)
+# write.csv preserves row names (sender cell types)
+write.csv(mat_res, file = "./giotto/BC.csv", row.names = TRUE)
+```
