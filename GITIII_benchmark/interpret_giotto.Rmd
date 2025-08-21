@@ -23,14 +23,13 @@ library(readr)
 # NSCLC
 
 ```{r}
-# Adjust the path if needed
-res <- readRDS("./giotto/NSCLC_res.rds")
-res$PI<-abs(res$PI)
+# ---- input ----
+res <- readRDS("./NSCLC_res.rds")
 
 # ---- processing ----
 res_processed <- res %>%
-  # 1) keep only p.adj >= 0.05 (i.e., remove rows with p.adj < 0.05)
-  filter(p.adj >= 0.05) %>%
+  # 1) keep only significant rows with positive fold change
+  filter(p.adj <= 0.05) %>%
   
   # 2) normalize PI within each ligand–receptor pair
   group_by(ligand, receptor) %>%
@@ -45,14 +44,13 @@ res_processed <- res %>%
 sender_receiver_avg <- res_processed %>%
   group_by(lig_cell_type, rec_cell_type) %>%
   summarise(PI_avg = mean(PI_norm, na.rm = TRUE), .groups = "drop") %>%
-  # 4) pivot to wide matrix-like table
   pivot_wider(
     names_from = rec_cell_type,
     values_from = PI_avg,
     values_fill = 0
   )
 
-# convert to a proper numeric matrix (rownames = sender / lig_cell_type)
+# convert to numeric matrix
 mat_res <- as.data.frame(sender_receiver_avg)
 rownames(mat_res) <- mat_res$lig_cell_type
 mat_res <- as.matrix(mat_res[ , setdiff(names(mat_res), "lig_cell_type"), drop = FALSE])
@@ -65,43 +63,89 @@ write.csv(mat_res, file = "./giotto/NSCLC.csv", row.names = TRUE)
 
 # BC
 
-```{r}
-# Adjust the path if needed
-res <- readRDS("./giotto/BC_res.rds")
-res$PI<-abs(res$PI)
+The results of Giotto of BC have Inf, so it is more complicate.
 
-# ---- processing ----
+```{r}
+
+library(dplyr)
+library(tidyr)
+
+# --- load ---
+res <- readRDS("./giotto/BC_res.rds")
+
+# Ensure PI is numeric (protects against accidental factors/characters)
+res <- res %>% mutate(PI = suppressWarnings(as.numeric(PI)))
+
+# --- quick DIAGNOSTICS (run these to see what's going on) ---
+cat("\nPI summary BEFORE any filtering:\n")
+print(summary(res$PI))
+
+cat("\nCounts per LR pair BEFORE any filtering (top 10):\n")
+print(res %>% count(ligand, receptor, name = "n_rows") %>% arrange(desc(n_rows)) %>% head(10))
+
+cat("\nHow many rows survive p.adj <= 0.05 (and log2fc >= 0 if applied)?\n")
+tmp_after_sig <- res %>% filter(p.adj <= 0.05)  # add , log2fc >= 0 if you want
+print(nrow(tmp_after_sig))
+
+cat("\nPI summary AFTER significance filter:\n")
+print(summary(tmp_after_sig$PI))
+
+# --- ROBUST PIPELINE ---
 res_processed <- res %>%
-  # 1) keep only p.adj >= 0.05 (i.e., remove rows with p.adj < 0.05)
-  filter(p.adj >= 0.05) %>%
-  
-  # 2) normalize PI within each ligand–receptor pair
+  # keep only significant rows (add log2fc >= 0 if desired)
+  filter(p.adj <= 0.05) %>%               # add: , log2fc >= 0
+  # keep finite, positive PI only (prevents zero/NaN denominators)
+  filter(is.finite(PI), PI > 0) %>%
   group_by(ligand, receptor) %>%
-  mutate(
-    sum_PI = sum(PI, na.rm = TRUE),
-    PI_norm = ifelse(sum_PI > 0, PI / sum_PI, 0)
-  ) %>%
+  # denominator per LR pair using finite PI
+  mutate(sum_PI = sum(PI, na.rm = TRUE)) %>%
+  # drop LR groups whose denominator is <= 0
+  filter(is.finite(sum_PI), sum_PI > 0) %>%
+  # normalize within LR
+  mutate(PI_norm = PI / sum_PI) %>%
   ungroup() %>%
   select(-sum_PI)
 
-# 3) summarize to sender (rows) × receiver (cols) by averaging normalized PI
-sender_receiver_avg <- res_processed %>%
-  group_by(lig_cell_type, rec_cell_type) %>%
-  summarise(PI_avg = mean(PI_norm, na.rm = TRUE), .groups = "drop") %>%
-  # 4) pivot to wide matrix-like table
-  pivot_wider(
-    names_from = rec_cell_type,
-    values_from = PI_avg,
-    values_fill = 0
-  )
+cat("\nPI_norm summary AFTER normalization step:\n")
+if (nrow(res_processed)) print(summary(res_processed$PI_norm)) else cat("No rows left.\n")
 
-# convert to a proper numeric matrix (rownames = sender / lig_cell_type)
-mat_res <- as.data.frame(sender_receiver_avg)
-rownames(mat_res) <- mat_res$lig_cell_type
-mat_res <- as.matrix(mat_res[ , setdiff(names(mat_res), "lig_cell_type"), drop = FALSE])
+# If nothing survives, create an empty matrix to avoid NaN propagation
+if (nrow(res_processed) == 0) {
+  sender_receiver_avg <- tibble(lig_cell_type = character(), rec_cell_type = character(), PI_avg = numeric())
+  mat_res <- matrix(numeric(0), nrow = 0, ncol = 0)
+} else {
+  # Summarize sender (rows) × receiver (cols); avoid NaN when all-NA
+  sender_receiver_avg <- res_processed %>%
+    group_by(lig_cell_type, rec_cell_type) %>%
+    summarise(
+      PI_avg = {
+        v <- PI_norm
+        if (!any(is.finite(v))) 0 else mean(v[is.finite(v)], na.rm = TRUE)
+      },
+      .groups = "drop"
+    ) %>%
+    pivot_wider(
+      names_from = rec_cell_type,
+      values_from = PI_avg,
+      values_fill = 0
+    ) %>%
+    # just in case: replace lingering NaN with 0
+    mutate(across(where(is.numeric), ~ replace(., is.nan(.), 0)))
+  
+  # Convert to numeric matrix
+  mat_res <- as.data.frame(sender_receiver_avg)
+  rownames(mat_res) <- mat_res$lig_cell_type
+  mat_res <- as.matrix(mat_res[, setdiff(names(mat_res), "lig_cell_type"), drop = FALSE])
+}
 
-# ---- output: CSV ----
+# --- save ---
 dir.create("./giotto", showWarnings = FALSE, recursive = TRUE)
-# write.csv preserves row names (sender cell types)
-write.csv(mat_res, file = "./giotto/BC.csv", row.names = TRUE)
+write.csv(mat_res, "./giotto/BC.csv", row.names = TRUE)
+
+# --- extra sanity checks ---
+if (length(mat_res)) {
+  cat("\nRow sums (sender totals):\n"); print(rowSums(mat_res))
+  cat("\nCol sums (receiver totals):\n"); print(colSums(mat_res))
+}
+
 ```
